@@ -1,5 +1,5 @@
 // index.js
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, startRegistration, register } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
@@ -42,87 +42,53 @@ ${primaryColor(`     /===================================================\\`)}
 
 
 // ===================================================
-// FUNCIÓN DE AUTENTICACIÓN CLÁSICA (SMS/WhatsApp)
-// ===================================================
-const authenticateWithCode = async (sock, state, saveCreds) => {
-    
-    // 1. Pedir el número de teléfono
-    const rl = readline.createInterface({ input, output });
-    console.clear();
-    console.log(chalk.yellow('>>> INICIO DE VINCULACIÓN: CÓDIGO SMS/WHATSAPP <<<'));
-    
-    const phoneNumber = await rl.question('1. Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
-    rl.close();
-    
-    let cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
-    if (cleanedNumber.startsWith('0')) cleanedNumber = cleanedNumber.substring(1);
-
-    // 2. Iniciar el registro y solicitar el código (Meta envía la notificación)
-    console.log(chalk.cyan(`\n2. Solicitando código para +${cleanedNumber} a través de SMS/WhatsApp...`));
-    
-    // Utilizamos startRegistration, que es la función correcta para iniciar el proceso
-    const registrationResult = await startRegistration({
-        method: 'sms', // Método de entrega preferido (sms o voice)
-        phoneNumber: cleanedNumber,
-        state: state,
-        saveCreds: saveCreds
-    });
-    
-    if (registrationResult.reason === 'too_recent') {
-        console.log(chalk.red(`❌ ERROR: Has solicitado un código muy recientemente. Inténtalo de nuevo en unos minutos.`));
-        exit(1);
-    }
-    
-    // 3. Esperar el código de 6 dígitos que llega por SMS/WhatsApp
-    console.log(chalk.yellow('\n>>> ¡IMPORTANTE! Revisa tu WhatsApp o SMS para el código de 6 dígitos. <<<'));
-    
-    const rl2 = readline.createInterface({ input, output });
-    const code = await rl2.question('3. Ingresa el código de 6 dígitos que recibiste: ');
-    rl2.close();
-    
-    // 4. Registrar la sesión con el código
-    console.log(chalk.cyan('\n4. Verificando código y registrando sesión...'));
-    
-    // Utilizamos la función 'register' para completar el proceso
-    const registration = await register(code, registrationResult.registrationId, cleanedNumber);
-
-    if (registration.status === 'ok') {
-        console.log(chalk.green('\n✅ ¡Registro exitoso! Guardando credenciales...'));
-    } else {
-        console.error(chalk.red(`\n❌ ERROR DE REGISTRO. Código incorrecto o fallido: ${registration.reason}`));
-        exit(1);
-    }
-    
-    // Ahora que tenemos las credenciales, re-iniciamos la conexión
-    connectToWhatsApp();
-}
-
-// ===================================================
 // FUNCIÓN PRINCIPAL DE CONEXIÓN
 // ===================================================
 async function connectToWhatsApp() {
+    // 1. Cargar estado de la sesión
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
     const { version } = await fetchLatestBaileysVersion();
     
-    // Si no está registrado, iniciamos la autenticación por código SMS
-    if (!state.creds.registered) {
-        // Ejecutamos la función de autenticación y salimos de esta instancia de connectToWhatsApp
-        // La propia función authenticateWithCode llamará a connectToWhatsApp() de nuevo si tiene éxito
-        if (!fs.existsSync(SESSION_PATH)) {
-            await startBanner(config.botName, config.ownerName); 
-        }
-        await authenticateWithCode(null, state, saveCreds);
-        return; 
-    }
-    
-    // 2. Configuración de la conexión (Solo si ya está registrado)
+    // 2. Configuración de la conexión (Activamos pairingCode)
     const sock = makeWASocket({
         version,
         logger,
+        pairingCode: true, // CLAVE: Usamos el método de 8 dígitos
         auth: state,
         browser: ['ISAA-NOVA', 'Safari', '1.0.0'],
         getMessage: async (key) => {}
     });
+
+    // 3. === Lógica para el código de emparejamiento (8 dígitos) ===
+    if (!sock.authState.creds.registered) {
+        
+        const rl = readline.createInterface({ input, output });
+        console.clear();
+        
+        const phoneNumber = await rl.question('Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
+        rl.close();
+
+        let cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
+        if (cleanedNumber.startsWith('0')) cleanedNumber = cleanedNumber.substring(1);
+
+        try {
+            // Utilizamos requestPairingCode que sí está disponible
+            const code = await sock.requestPairingCode(cleanedNumber);
+            
+            console.log(`\n======================================================`);
+            console.log(chalk.green(`✅ CÓDIGO DE EMPAREJAMIENTO GENERADO: ${code}`));
+            console.log(`======================================================`);
+            console.log(chalk.yellow(`\nInstrucciones en WhatsApp:`));
+            console.log(`1. Abrir WhatsApp, ir a Ajustes > Dispositivos vinculados.`);
+            console.log(`2. Tocar "Vincular un dispositivo" y luego "Vincular con el número de teléfono".`);
+            console.log(`3. Ingresar el código de 8 dígitos mostrado arriba: ${code}\n`);
+            
+        } catch (error) {
+            console.error(chalk.red("Error al generar el código de emparejamiento. Revisa el formato del número."), error);
+            exit(1); 
+        }
+    }
+    // ===================================================
 
     // 4. Manejar actualización de conexión
     sock.ev.on('connection.update', (update) => {
@@ -136,6 +102,13 @@ async function connectToWhatsApp() {
                 exit(0); 
             } 
             
+            // PREVENCIÓN DE BUCLE 408: Si no está registrado, no reconectar mientras se espera el código
+            if (!sock.authState.creds.registered) {
+                console.log(chalk.yellow(`\n⚠️ Esperando vinculación en WhatsApp. El bot no intentará reconectar.`));
+                return; 
+            }
+            
+            // Si ya está registrado, sí reconectamos
             if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, 408, 428].includes(reason)) {
                 console.log(`Conexión cerrada. Razón: ${reason}. Reconectando en 3 segundos...`);
                 setTimeout(() => connectToWhatsApp(), 3000); 
@@ -157,7 +130,6 @@ async function connectToWhatsApp() {
         const message = m.messages[0];
         if (message.key.remoteJid === 'status@broadcast') return;
         
-        // Usamos try-catch para proteger el bot si el handler falla
         try {
             await handleMessage(sock, message, config);
         } catch (error) {
@@ -167,13 +139,40 @@ async function connectToWhatsApp() {
 
     // 7. Evento de Bienvenida (se mantiene)
     sock.ev.on('group-participants.update', async (data) => {
-        // ... (Tu lógica de bienvenida se mantiene aquí)
+        const { id, participants, action } = data;
+        
+        if (action === 'add' && participants.length > 0) {
+            try {
+                const metadata = await sock.groupMetadata(id);
+                const memberJid = participants[0];
+                
+                const welcomeText = `👋 ¡Hola @${memberJid.split('@')[0]}! Bienvenido/a al grupo **${metadata.subject}**.\n\nSoy **${config.botName}**.\n\nEscribe **${config.prefix}menu** para ver mis comandos.\n\n🧑‍💻 Mi dueño es: ${config.ownerName}`;
+    
+                const messageOptions = {
+                    caption: welcomeText,
+                    mentions: [memberJid]
+                };
+    
+                if (fs.existsSync(config.logoPath)) {
+                    messageOptions.image = fs.readFileSync(config.logoPath);
+                } else {
+                    messageOptions.text = welcomeText;
+                    delete messageOptions.caption;
+                    delete messageOptions.image;
+                }
+    
+                await sock.sendMessage(id, messageOptions);
+
+            } catch (error) {
+                console.error("Error al enviar bienvenida:", error);
+            }
+        }
     });
 }
 
 // INICIO DEL BOT
 (async () => {
-    // Si ya existe la sesión, simplemente conecta. Si no, authenticateWithCode lo manejará.
+    // Si ya existe la sesión, simplemente conecta. Si no, pide el número.
     if (fs.existsSync(SESSION_PATH)) {
         await startBanner(config.botName, config.ownerName); 
     }
