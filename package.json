@@ -5,7 +5,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "keywords": [
     "whatsapp-bot",
@@ -18,8 +19,12 @@
     "pino": "^8.1.0",
     "qrcode-terminal": "^0.12.0",
     "fs-extra": "^11.1.0",
-    "fluent-ffmpeg": "^2.1.2",
     "axios": "^1.2.1",
-    "jimp": "^0.22.12"
+    "jimp": "^0.22.12",
+    "chalk": "^5.2.0",
+    "moment": "^2.29.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
