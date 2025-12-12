@@ -7,8 +7,8 @@ import path from 'path';
 import config from './config.js';
 import handleMessage from './handler.js';
 import readline from 'readline/promises'; 
-import { stdin as input, stdout as output, exit } from 'process'; // Importamos 'exit'
-import chalk from 'chalk'; // Para colores en el banner
+import { stdin as input, stdout as output, exit } from 'process';
+import chalk from 'chalk'; 
 
 // Logger
 const logger = pino({ level: 'silent' });
@@ -55,7 +55,7 @@ async function connectToWhatsApp() {
     const sock = makeWASocket({
         version,
         logger,
-        pairingCode: true, // <-- Activamos el código de emparejamiento
+        pairingCode: true, // Activamos el código de emparejamiento
         auth: state,
         browser: ['ISAA-NOVA', 'Safari', '1.0.0'],
         getMessage: async (key) => {
@@ -67,7 +67,8 @@ async function connectToWhatsApp() {
     if (!sock.authState.creds.registered && config.pairingCode) {
         
         const rl = readline.createInterface({ input, output });
-
+        console.clear(); // Limpia la consola para que el prompt sea visible
+        
         const phoneNumber = await rl.question('Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
         rl.close();
 
@@ -88,7 +89,7 @@ async function connectToWhatsApp() {
             
         } catch (error) {
             console.error("Error al generar el código de emparejamiento. Revisa el formato del número:", error);
-            exit(1); // Sale del programa si falla la generación
+            exit(1); 
         }
     }
     // ===================================================
@@ -103,7 +104,18 @@ async function connectToWhatsApp() {
             if (reason === DisconnectReason.loggedOut) {
                 console.log('Dispositivo desconectado. Por favor, elimina la carpeta sessions y vincula de nuevo.');
                 exit(0); 
-            } else if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, 408, 428].includes(reason)) {
+            } 
+            
+            // CORRECCIÓN CRÍTICA: NO reconectar si NO estamos registrados Y usamos pairingCode
+            if (!sock.authState.creds.registered && config.pairingCode) {
+                console.log(`\n=============================================================================`);
+                console.log(`⚠️ Esperando vinculación en WhatsApp. El bot no intentará reconectar para evitar bucle 408.`);
+                console.log(`=============================================================================\n`);
+                return; // EVITA LA RECONEXIÓN AQUÍ MIENTRAS ESPERA EL VÍNCULO
+            }
+            
+            // Si ya estamos registrados o no usamos pairingCode, intentamos reconectar
+            if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, 408, 428].includes(reason)) {
                 console.log(`Conexión cerrada. Razón: ${reason}. Reconectando en 3 segundos...`);
                 setTimeout(() => connectToWhatsApp(), 3000); 
             } else {
