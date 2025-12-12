@@ -1,9 +1,8 @@
 // index.js
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@adiwajshing/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
-import path from 'path';
 import config from './config.js';
 import handleMessage from './handler.js';
 
@@ -21,7 +20,7 @@ async function connectToWhatsApp() {
         auth: state,
         browser: ['ISAA-NOVA', 'Safari', '1.0.0'],
         getMessage: async (key) => {
-            // Lógica para obtener mensajes si es necesario
+            // Lógica para obtener mensajes (opcional)
         }
     });
 
@@ -31,19 +30,11 @@ async function connectToWhatsApp() {
             let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
             if (reason === DisconnectReason.loggedOut) {
                 console.log('Dispositivo desconectado. Por favor, elimina la carpeta sessions y escanea de nuevo.');
-            } else if (reason === DisconnectReason.badSession) {
-                console.log('Sesión mala. Por favor, elimina la carpeta sessions y escanea de nuevo.');
-            } else if (reason === DisconnectReason.connectionClosed) {
-                console.log('Conexión cerrada. Reconectando...');
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.connectionLost) {
-                console.log('Conexión perdida. Reconectando...');
-                connectToWhatsApp();
-            } else if (reason === DisconnectReason.restartRequired) {
-                console.log('Reinicio requerido. Reiniciando...');
+            } else if (reason === DisconnectReason.connectionClosed || reason === DisconnectReason.connectionLost || reason === DisconnectReason.restartRequired) {
+                console.log(`Conexión cerrada. Razón: ${reason}. Reconectando...`);
                 connectToWhatsApp();
             } else {
-                console.log(`Conexión cerrada debido a: ${reason}. ${lastDisconnect?.error}`);
+                console.log(`Conexión cerrada. Error: ${reason}.`);
             }
         } else if (connection === 'open') {
             console.log('Conexión exitosa. Bot listo.');
@@ -55,32 +46,43 @@ async function connectToWhatsApp() {
 
     // Manejar mensajes
     sock.ev.on('messages.upsert', async (m) => {
-        if (!m.messages) return;
+        if (!m.messages || m.messages.length === 0) return;
         const message = m.messages[0];
-        if (message.key.remoteJid === 'status@broadcast') return;
         
         // Llama al manejador de comandos
         await handleMessage(sock, message, config);
     });
 
-    // Evento de adición/salida de grupo (Bienvenida)
+    // Evento de Bienvenida
     sock.ev.on('group-participants.update', async (data) => {
         const { id, participants, action } = data;
-        const metadata = await sock.groupMetadata(id);
         
         if (action === 'add' && participants.length > 0) {
-            const memberJid = participants[0];
-            const welcomeText = `👋 ¡Hola @${memberJid.split('@')[0]}! Bienvenido/a al grupo **${metadata.subject}**.\n\nSoy **${config.botName}**.\n\nEscribe **${config.prefix}menu** para ver mis comandos.\n\n🧑‍💻 Mi dueño es: ${config.ownerName}`;
-
-            // Envía la imagen y el texto de bienvenida
-            if (fs.existsSync(config.logoPath)) {
-                await sock.sendMessage(id, { 
-                    image: fs.readFileSync(config.logoPath),
+            try {
+                const metadata = await sock.groupMetadata(id);
+                const memberJid = participants[0];
+                const memberName = memberJid.split('@')[0];
+                
+                const welcomeText = `👋 ¡Hola @${memberName}! Bienvenido/a al grupo **${metadata.subject}**.\n\nSoy **${config.botName}**.\n\nEscribe **${config.prefix}menu** para ver mis comandos.\n\n🧑‍💻 Mi dueño es: ${config.ownerName}`;
+    
+                const messageOptions = {
                     caption: welcomeText,
                     mentions: [memberJid]
-                });
-            } else {
-                await sock.sendMessage(id, { text: welcomeText, mentions: [memberJid] });
+                };
+    
+                // Adjuntar la imagen si existe
+                if (fs.existsSync(config.logoPath)) {
+                    messageOptions.image = fs.readFileSync(config.logoPath);
+                } else {
+                    messageOptions.text = welcomeText;
+                    delete messageOptions.caption;
+                    delete messageOptions.image;
+                }
+    
+                await sock.sendMessage(id, messageOptions);
+
+            } catch (error) {
+                console.error("Error al enviar bienvenida:", error);
             }
         }
     });
