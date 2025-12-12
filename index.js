@@ -1,5 +1,5 @@
 // index.js
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, startRegistration, register } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
@@ -12,7 +12,7 @@ import chalk from 'chalk';
 
 // Logger
 const logger = pino({ level: 'silent' });
-const SESSION_PATH = 'sessions'; // Carpeta de la sesión
+const SESSION_PATH = 'sessions';
 
 // ===================================================
 // FUNCIÓN PARA EL BANNER ASCII ART
@@ -44,7 +44,7 @@ ${primaryColor(`     /===================================================\\`)}
 // ===================================================
 // FUNCIÓN DE AUTENTICACIÓN CLÁSICA (SMS/WhatsApp)
 // ===================================================
-const authenticateWithCode = async (sock) => {
+const authenticateWithCode = async (sock, state, saveCreds) => {
     
     // 1. Pedir el número de teléfono
     const rl = readline.createInterface({ input, output });
@@ -52,68 +52,77 @@ const authenticateWithCode = async (sock) => {
     console.log(chalk.yellow('>>> INICIO DE VINCULACIÓN: CÓDIGO SMS/WHATSAPP <<<'));
     
     const phoneNumber = await rl.question('1. Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
+    rl.close();
+    
     let cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
     if (cleanedNumber.startsWith('0')) cleanedNumber = cleanedNumber.substring(1);
 
-    // 2. Solicitar el código al servidor (Meta envía el código de 6 dígitos)
-    console.log(chalk.cyan(`\n2. Solicitando código para +${cleanedNumber}...`));
+    // 2. Iniciar el registro y solicitar el código (Meta envía la notificación)
+    console.log(chalk.cyan(`\n2. Solicitando código para +${cleanedNumber} a través de SMS/WhatsApp...`));
     
-    // Aquí es donde el servidor de Meta te envía la notificación/SMS
-    const codeRequest = await sock.requestRegistrationCode({
-        method: 'sms', // Puedes usar 'sms' o 'voice'
-        phoneNumber: cleanedNumber
+    // Utilizamos startRegistration, que es la función correcta para iniciar el proceso
+    const registrationResult = await startRegistration({
+        method: 'sms', // Método de entrega preferido (sms o voice)
+        phoneNumber: cleanedNumber,
+        state: state,
+        saveCreds: saveCreds
     });
     
-    if (codeRequest.success === false) {
-        console.error(chalk.red('❌ ERROR: No se pudo solicitar el código. Verifica el número o espera.'));
-        rl.close();
+    if (registrationResult.reason === 'too_recent') {
+        console.log(chalk.red(`❌ ERROR: Has solicitado un código muy recientemente. Inténtalo de nuevo en unos minutos.`));
         exit(1);
     }
-
+    
     // 3. Esperar el código de 6 dígitos que llega por SMS/WhatsApp
     console.log(chalk.yellow('\n>>> ¡IMPORTANTE! Revisa tu WhatsApp o SMS para el código de 6 dígitos. <<<'));
     
-    const code = await rl.question('3. Ingresa el código de 6 dígitos que recibiste: ');
+    const rl2 = readline.createInterface({ input, output });
+    const code = await rl2.question('3. Ingresa el código de 6 dígitos que recibiste: ');
+    rl2.close();
     
     // 4. Registrar la sesión con el código
     console.log(chalk.cyan('\n4. Verificando código y registrando sesión...'));
-    const registration = await sock.register(code);
+    
+    // Utilizamos la función 'register' para completar el proceso
+    const registration = await register(code, registrationResult.registrationId, cleanedNumber);
 
-    if (registration.success) {
+    if (registration.status === 'ok') {
         console.log(chalk.green('\n✅ ¡Registro exitoso! Guardando credenciales...'));
     } else {
         console.error(chalk.red(`\n❌ ERROR DE REGISTRO. Código incorrecto o fallido: ${registration.reason}`));
-        rl.close();
         exit(1);
     }
-    rl.close();
-    // El proceso continuará con la conexión normal
+    
+    // Ahora que tenemos las credenciales, re-iniciamos la conexión
+    connectToWhatsApp();
 }
 
 // ===================================================
 // FUNCIÓN PRINCIPAL DE CONEXIÓN
 // ===================================================
 async function connectToWhatsApp() {
-    // 1. Cargar estado de la sesión
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
     const { version } = await fetchLatestBaileysVersion();
     
-    // 2. Configuración de la conexión
+    // Si no está registrado, iniciamos la autenticación por código SMS
+    if (!state.creds.registered) {
+        // Ejecutamos la función de autenticación y salimos de esta instancia de connectToWhatsApp
+        // La propia función authenticateWithCode llamará a connectToWhatsApp() de nuevo si tiene éxito
+        if (!fs.existsSync(SESSION_PATH)) {
+            await startBanner(config.botName, config.ownerName); 
+        }
+        await authenticateWithCode(null, state, saveCreds);
+        return; 
+    }
+    
+    // 2. Configuración de la conexión (Solo si ya está registrado)
     const sock = makeWASocket({
         version,
         logger,
-        // Eliminamos pairingCode: true para usar el método de código de 6 dígitos
         auth: state,
         browser: ['ISAA-NOVA', 'Safari', '1.0.0'],
         getMessage: async (key) => {}
     });
-
-    // 3. === Lógica de Autenticación Clásica (Si no está registrado) ===
-    if (!sock.authState.creds.registered) {
-        await authenticateWithCode(sock);
-        // Si el registro es exitoso, el flujo continúa y la conexión se abrirá.
-    }
-    // ===================================================
 
     // 4. Manejar actualización de conexión
     sock.ev.on('connection.update', (update) => {
@@ -127,13 +136,11 @@ async function connectToWhatsApp() {
                 exit(0); 
             } 
             
-            // Si la conexión se cierra y ya estamos registrados, intentamos reconectar
-            if (sock.authState.creds.registered && [DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, 408, 428].includes(reason)) {
+            if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, 408, 428].includes(reason)) {
                 console.log(`Conexión cerrada. Razón: ${reason}. Reconectando en 3 segundos...`);
                 setTimeout(() => connectToWhatsApp(), 3000); 
-            } else if (!sock.authState.creds.registered) {
-                 // Si no está registrado, no reconectamos aquí; el flujo de authenticateWithCode lo maneja.
-                 console.log(chalk.yellow('⚠️ Conexión terminada durante la autenticación. Vuelve a iniciar si no se completó.'));
+            } else {
+                 console.log(`Conexión cerrada debido a: ${reason}. ${lastDisconnect?.error}`);
             }
             
         } else if (connection === 'open') {
@@ -150,7 +157,12 @@ async function connectToWhatsApp() {
         const message = m.messages[0];
         if (message.key.remoteJid === 'status@broadcast') return;
         
-        await handleMessage(sock, message, config);
+        // Usamos try-catch para proteger el bot si el handler falla
+        try {
+            await handleMessage(sock, message, config);
+        } catch (error) {
+            logger.error('Error al manejar mensaje:', error);
+        }
     });
 
     // 7. Evento de Bienvenida (se mantiene)
@@ -161,8 +173,8 @@ async function connectToWhatsApp() {
 
 // INICIO DEL BOT
 (async () => {
-    // Si ya existe la carpeta de sesiones, saltamos el banner para evitar interrupciones en la reconexión.
-    if (!fs.existsSync(SESSION_PATH)) {
+    // Si ya existe la sesión, simplemente conecta. Si no, authenticateWithCode lo manejará.
+    if (fs.existsSync(SESSION_PATH)) {
         await startBanner(config.botName, config.ownerName); 
     }
     connectToWhatsApp();
