@@ -1,84 +1,122 @@
-// handler.js
-import fs from 'fs-extra';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Función para cargar dinámicamente todos los comandos
-const loadCommands = (dir) => {
+// Cargar comandos dinámicamente
+const loadCommands = () => {
     const commands = {};
-    // CORRECCIÓN CLAVE: Usamos __dirname y 'dir' (que es 'commands') para resolver la ruta absoluta
-    const commandDir = path.resolve(__dirname, dir);
+    const commandDir = path.join(__dirname, 'commands');
     
-    // Leer todas las subcarpetas (info, games, tools, etc.)
-    // Si la carpeta 'commands' no existe, fs.readdirSync lanzará el error ENOENT.
-    // Asegúrate de que existe: ISAA-NOVA-v1/commands/
-    try {
-        const categories = fs.readdirSync(commandDir).filter(f => fs.statSync(path.join(commandDir, f)).isDirectory());
-
-        for (const category of categories) {
-            const categoryPath = path.join(commandDir, category);
-            const commandFiles = fs.readdirSync(categoryPath).filter(f => f.endsWith('.js'));
-
-            for (const file of commandFiles) {
-                const commandPath = path.join(categoryPath, file);
-                // Importar dinámicamente el comando
-                import(`file://${commandPath}`).then(module => {
-                    const command = module.default;
-                    if (command && command.name) {
-                        // Mapear tanto por nombre como por alias (si existe)
-                        commands[command.name] = command;
-                        if (command.alias && Array.isArray(command.alias)) {
-                            command.alias.forEach(alias => {
-                                commands[alias] = command;
-                            });
-                        }
-                    }
-                }).catch(error => {
-                    console.error(`Error al cargar el comando ${file}:`, error);
-                });
+    // Si no existe la carpeta de comandos, crear estructura básica
+    if (!fs.existsSync(commandDir)) {
+        console.error('❌ ERROR: No existe la carpeta commands/');
+        console.log('📁 Creando estructura básica de comandos...');
+        
+        // Crear estructura básica
+        const categories = ['info', 'tools', 'games', 'admin'];
+        categories.forEach(cat => {
+            const catPath = path.join(commandDir, cat);
+            if (!fs.existsSync(catPath)) {
+                fs.mkdirSync(catPath, { recursive: true });
+                // Crear archivo de ejemplo
+                const exampleCmd = path.join(catPath, 'example.js');
+                if (!fs.existsSync(exampleCmd)) {
+                    fs.writeFileSync(exampleCmd, 
+`export default {
+    name: 'example',
+    alias: ['ex', 'ejemplo'],
+    description: 'Comando de ejemplo',
+    execute: async (sock, message, args, config) => {
+        const from = message.key.remoteJid;
+        await sock.sendMessage(from, 
+            { text: '✅ Este es un comando de ejemplo de ISAA-NOVA' }, 
+            { quoted: message }
+        );
+    }
+};`);
+                }
             }
-        }
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.error(`\n======================================================`);
-            console.error(`❌ ERROR CRÍTICO: El directorio de comandos no existe.`);
-            console.error(`Por favor, crea la carpeta: ${commandDir}`);
-            console.error(`======================================================\n`);
-        } else {
-            console.error("Error desconocido al cargar comandos:", error);
+        });
+        
+        console.log('✅ Estructura creada. Reinicia el bot.');
+        return commands;
+    }
+
+    // Leer todas las categorías
+    const categories = fs.readdirSync(commandDir)
+        .filter(f => fs.statSync(path.join(commandDir, f)).isDirectory());
+
+    for (const category of categories) {
+        const categoryPath = path.join(commandDir, category);
+        const commandFiles = fs.readdirSync(categoryPath)
+            .filter(f => f.endsWith('.js'));
+
+        for (const file of commandFiles) {
+            try {
+                const commandPath = `./commands/${category}/${file}`;
+                const module = await import(commandPath);
+                const command = module.default;
+                
+                if (command && command.name) {
+                    commands[command.name] = command;
+                    console.log(`✅ Comando cargado: ${command.name}`);
+                    
+                    // Registrar alias
+                    if (command.alias && Array.isArray(command.alias)) {
+                        command.alias.forEach(alias => {
+                            commands[alias] = command;
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error(`❌ Error cargando ${file}:`, error.message);
+            }
         }
     }
     
+    console.log(`📊 Total comandos cargados: ${Object.keys(commands).length}`);
     return commands;
 };
 
-// Cargar comandos una vez al inicio.
-// 'commands' es la ruta relativa a la carpeta del bot.
-const commands = loadCommands('commands');
+// Cargar comandos al inicio
+const commands = await loadCommands();
 
+// Manejar mensajes
 export default async function handleMessage(sock, message, config) {
-    const from = message.key.remoteJid;
-    const text = message.message?.conversation || message.message?.extendedTextMessage?.text || '';
-    
-    // Ignorar mensajes sin prefijo o del propio bot
-    if (!text.startsWith(config.prefix) || message.key.fromMe) return;
+    try {
+        const from = message.key.remoteJid;
+        const text = message.message?.conversation || 
+                     message.message?.extendedTextMessage?.text || 
+                     message.message?.imageMessage?.caption || 
+                     '';
+        
+        // Ignorar mensajes sin prefijo o del propio bot
+        if (!text.startsWith(config.prefix) || message.key.fromMe) return;
 
-    // Parsear comando y argumentos
-    const args = text.slice(config.prefix.length).trim().split(/ +/);
-    const commandName = args.shift().toLowerCase();
-    
-    const command = commands[commandName];
+        // Parsear comando
+        const args = text.slice(config.prefix.length).trim().split(/ +/);
+        const commandName = args.shift().toLowerCase();
+        
+        console.log(`📩 Comando recibido: ${commandName} de ${from}`);
 
-    if (command) {
-        try {
-            console.log(`Ejecutando comando: ${commandName} en ${from}`);
-            await command.execute(sock, message, args, config);
-        } catch (error) {
-            console.error(`Error al ejecutar el comando ${commandName}:`, error);
-            await sock.sendMessage(from, { text: '❌ Ocurrió un error interno al ejecutar el comando.' }, { quoted: message });
+        // Buscar comando
+        const command = commands[commandName];
+        
+        if (!command) {
+            await sock.sendMessage(from, 
+                { text: `❌ Comando no encontrado. Usa ${config.prefix}menu para ver comandos disponibles.` }, 
+                { quoted: message }
+            );
+            return;
         }
+
+        // Ejecutar comando
+        await command.execute(sock, message, args, config);
+        
+    } catch (error) {
+        console.error('❌ Error en handleMessage:', error);
     }
 }
