@@ -1,3 +1,4 @@
+// handler.js
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -5,30 +6,31 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Cargar comandos dinámicamente
-const loadCommands = () => {
-    const commands = {};
-    const commandDir = path.join(__dirname, 'commands');
+// Objeto para almacenar comandos cargados
+const commands = {};
+
+// Función para cargar comandos dinámicamente y de forma síncrona
+const loadCommands = (commandDir) => {
     
     // Si no existe la carpeta de comandos, crear estructura básica
     if (!fs.existsSync(commandDir)) {
         console.error('❌ ERROR: No existe la carpeta commands/');
         console.log('📁 Creando estructura básica de comandos...');
         
-        // Crear estructura básica
-        const categories = ['info', 'tools', 'games', 'admin'];
-        categories.forEach(cat => {
-            const catPath = path.join(commandDir, cat);
-            if (!fs.existsSync(catPath)) {
+        try {
+            const categories = ['info', 'tools', 'games', 'admin'];
+            categories.forEach(cat => {
+                const catPath = path.join(commandDir, cat);
                 fs.mkdirSync(catPath, { recursive: true });
-                // Crear archivo de ejemplo
+                
+                // Crear archivo de ejemplo (síncrono)
                 const exampleCmd = path.join(catPath, 'example.js');
-                if (!fs.existsSync(exampleCmd)) {
-                    fs.writeFileSync(exampleCmd, 
+                fs.writeFileSync(exampleCmd, 
 `export default {
     name: 'example',
     alias: ['ex', 'ejemplo'],
     description: 'Comando de ejemplo',
+    category: '${cat}',
     execute: async (sock, message, args, config) => {
         const from = message.key.remoteJid;
         await sock.sendMessage(from, 
@@ -37,17 +39,21 @@ const loadCommands = () => {
         );
     }
 };`);
-                }
-            }
-        });
-        
-        console.log('✅ Estructura creada. Reinicia el bot.');
-        return commands;
+            });
+            
+            console.log('✅ Estructura creada. ¡Reinicia el bot para cargar comandos!');
+            return; // Detener la carga aquí, se debe reiniciar.
+        } catch (e) {
+            console.error('❌ Error al crear estructura:', e.message);
+            return;
+        }
     }
 
     // Leer todas las categorías
     const categories = fs.readdirSync(commandDir)
         .filter(f => fs.statSync(path.join(commandDir, f)).isDirectory());
+
+    const commandPromises = [];
 
     for (const category of categories) {
         const categoryPath = path.join(commandDir, category);
@@ -55,36 +61,47 @@ const loadCommands = () => {
             .filter(f => f.endsWith('.js'));
 
         for (const file of commandFiles) {
-            try {
-                const commandPath = `./commands/${category}/${file}`;
-                const module = await import(commandPath);
-                const command = module.default;
-                
-                if (command && command.name) {
-                    commands[command.name] = command;
-                    console.log(`✅ Comando cargado: ${command.name}`);
+            const commandPath = path.join(categoryPath, file);
+            
+            const importPromise = import(`file://${commandPath}`)
+                .then(module => {
+                    const command = module.default;
                     
-                    // Registrar alias
-                    if (command.alias && Array.isArray(command.alias)) {
-                        command.alias.forEach(alias => {
-                            commands[alias] = command;
-                        });
+                    if (command && command.name) {
+                        commands[command.name] = command;
+                        console.log(`✅ Comando cargado: ${command.name} (${category})`);
+                        
+                        // Registrar alias
+                        if (command.alias && Array.isArray(command.alias)) {
+                            command.alias.forEach(alias => {
+                                commands[alias] = command;
+                            });
+                        }
                     }
-                }
-            } catch (error) {
-                console.error(`❌ Error cargando ${file}:`, error.message);
-            }
+                })
+                .catch(error => {
+                    console.error(`❌ Error cargando ${file}:`, error.message);
+                });
+            
+            commandPromises.push(importPromise);
         }
     }
-    
-    console.log(`📊 Total comandos cargados: ${Object.keys(commands).length}`);
-    return commands;
+
+    // Esperar a que todos los comandos se carguen de forma asíncrona
+    Promise.all(commandPromises)
+        .then(() => {
+            console.log(`\n📊 Total comandos cargados: ${Object.keys(commands).length}`);
+        })
+        .catch(err => {
+            console.error('❌ Error general al esperar comandos:', err);
+        });
 };
 
-// Cargar comandos al inicio
-const commands = await loadCommands();
+// Ejecutar la carga de comandos al inicio
+loadCommands(path.join(__dirname, 'commands'));
 
-// Manejar mensajes
+
+// Manejar mensajes (Exportado como función asíncrona)
 export default async function handleMessage(sock, message, config) {
     try {
         const from = message.key.remoteJid;
@@ -118,5 +135,10 @@ export default async function handleMessage(sock, message, config) {
         
     } catch (error) {
         console.error('❌ Error en handleMessage:', error);
+        const from = message.key.remoteJid;
+         await sock.sendMessage(from, 
+            { text: '⚠️ Ocurrió un error inesperado al procesar el mensaje.' }, 
+            { quoted: message }
+        );
     }
-}
+    }
