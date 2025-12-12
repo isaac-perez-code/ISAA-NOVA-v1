@@ -10,9 +10,10 @@ import readline from 'readline/promises';
 import { stdin as input, stdout as output, exit } from 'process';
 import chalk from 'chalk'; 
 
-// Logger
+// Logger y configuración
 const logger = pino({ level: 'silent' });
 const SESSION_PATH = 'sessions';
+let pairingAttempted = false; // Bandera para controlar que solo pidamos el número una vez
 
 // ===================================================
 // FUNCIÓN PARA EL BANNER ASCII ART
@@ -53,47 +54,57 @@ async function connectToWhatsApp() {
     const sock = makeWASocket({
         version,
         logger,
-        pairingCode: true, // CLAVE: Usamos el método de 8 dígitos
+        pairingCode: true, // Usamos el método de 8 dígitos
         auth: state,
         browser: ['ISAA-NOVA', 'Safari', '1.0.0'],
         getMessage: async (key) => {}
     });
 
-    // 3. === Lógica para el código de emparejamiento (8 dígitos) ===
-    if (!sock.authState.creds.registered) {
-        
-        const rl = readline.createInterface({ input, output });
-        console.clear();
-        
-        const phoneNumber = await rl.question('Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
-        rl.close();
-
-        let cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
-        if (cleanedNumber.startsWith('0')) cleanedNumber = cleanedNumber.substring(1);
-
-        try {
-            // Utilizamos requestPairingCode que sí está disponible
-            const code = await sock.requestPairingCode(cleanedNumber);
-            
-            console.log(`\n======================================================`);
-            console.log(chalk.green(`✅ CÓDIGO DE EMPAREJAMIENTO GENERADO: ${code}`));
-            console.log(`======================================================`);
-            console.log(chalk.yellow(`\nInstrucciones en WhatsApp:`));
-            console.log(`1. Abrir WhatsApp, ir a Ajustes > Dispositivos vinculados.`);
-            console.log(`2. Tocar "Vincular un dispositivo" y luego "Vincular con el número de teléfono".`);
-            console.log(`3. Ingresar el código de 8 dígitos mostrado arriba: ${code}\n`);
-            
-        } catch (error) {
-            console.error(chalk.red("Error al generar el código de emparejamiento. Revisa el formato del número."), error);
-            exit(1); 
-        }
-    }
-    // ===================================================
-
-    // 4. Manejar actualización de conexión
-    sock.ev.on('connection.update', (update) => {
+    // 4. Manejar actualización de conexión (AQUÍ PONEMOS LA LÓGICA DE EMPAREJAMIENTO)
+    sock.ev.on('connection.update', async (update) => { // La función debe ser async
         const { connection, lastDisconnect } = update;
         
+        // ===================================================
+        // LÓGICA DE VINCULACIÓN CON CÓDIGO DE EMPAREJAMIENTO
+        // Se ejecuta si la conexión se cierra, no estamos registrados, y no hemos intentado el pairing.
+        // Esto previene el error 428/Connection Closed al estabilizar el socket.
+        // ===================================================
+        if (connection === 'close' && 
+            !sock.authState.creds.registered && 
+            !pairingAttempted) {
+            
+            pairingAttempted = true; // Marcamos que ya se intentó
+            
+            // Si la conexión se cerró antes de vincular, intentamos solicitar el código aquí
+            const rl = readline.createInterface({ input, output });
+            console.clear();
+            
+            const phoneNumber = await rl.question('Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
+            rl.close();
+
+            let cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
+            if (cleanedNumber.startsWith('0')) cleanedNumber = cleanedNumber.substring(1);
+
+            try {
+                const code = await sock.requestPairingCode(cleanedNumber);
+                
+                console.log(`\n======================================================`);
+                console.log(chalk.green(`✅ CÓDIGO DE EMPAREJAMIENTO GENERADO: ${code}`));
+                console.log(`======================================================`);
+                console.log(chalk.yellow(`\nInstrucciones en WhatsApp:`));
+                console.log(`1. Abrir WhatsApp, ir a Ajustes > Dispositivos vinculados.`);
+                console.log(`2. Tocar "Vincular un dispositivo" y luego "Vincular con el número de teléfono".`);
+                console.log(`3. Ingresar el código de 8 dígitos mostrado arriba: ${code}\n`);
+                // Detenemos la reconexión normal aquí, ya que estamos esperando la vinculación del usuario
+                return;
+
+            } catch (error) {
+                console.error(chalk.red("Error al generar el código de emparejamiento. Revisa el formato del número."), error);
+                exit(1); 
+            }
+        }
+        
+        // Lógica normal de reconexión
         if (connection === 'close') {
             let reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
 
@@ -102,13 +113,13 @@ async function connectToWhatsApp() {
                 exit(0); 
             } 
             
-            // PREVENCIÓN DE BUCLE 408: Si no está registrado, no reconectar mientras se espera el código
-            if (!sock.authState.creds.registered) {
+            // Si no está registrado Y el intento de pairing ya fue marcado, no reconectamos
+            if (!sock.authState.creds.registered && pairingAttempted) {
                 console.log(chalk.yellow(`\n⚠️ Esperando vinculación en WhatsApp. El bot no intentará reconectar.`));
-                return; 
+                return;
             }
             
-            // Si ya está registrado, sí reconectamos
+            // Si ya está registrado, reconectamos
             if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, 408, 428].includes(reason)) {
                 console.log(`Conexión cerrada. Razón: ${reason}. Reconectando en 3 segundos...`);
                 setTimeout(() => connectToWhatsApp(), 3000); 
@@ -124,7 +135,7 @@ async function connectToWhatsApp() {
     // 5. Guardar credenciales
     sock.ev.on('creds.update', saveCreds);
 
-    // 6. Manejar mensajes (resto de la lógica es la misma)
+    // 6. Manejar mensajes
     sock.ev.on('messages.upsert', async (m) => {
         if (!m.messages || m.messages.length === 0) return;
         const message = m.messages[0];
@@ -137,7 +148,7 @@ async function connectToWhatsApp() {
         }
     });
 
-    // 7. Evento de Bienvenida (se mantiene)
+    // 7. Evento de Bienvenida
     sock.ev.on('group-participants.update', async (data) => {
         const { id, participants, action } = data;
         
@@ -172,8 +183,8 @@ async function connectToWhatsApp() {
 
 // INICIO DEL BOT
 (async () => {
-    // Si ya existe la sesión, simplemente conecta. Si no, pide el número.
-    if (fs.existsSync(SESSION_PATH)) {
+    // Solo mostramos el banner si la sesión no existe (primer inicio)
+    if (!fs.existsSync(SESSION_PATH)) {
         await startBanner(config.botName, config.ownerName); 
     }
     connectToWhatsApp();
