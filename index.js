@@ -43,18 +43,16 @@ ${primaryColor(`     /===================================================\\`)}
 
 
 // ===================================================
-// NUEVA FUNCIÓN: Flujo de Vinculación con Menú
+// FUNCIÓN: Flujo de Vinculación con Menú
 // ===================================================
 async function handlePairingFlow(sock) {
     
-    // 1. Mostrar menú de opciones
     const rl = readline.createInterface({ input, output });
     console.clear();
-    await startBanner(config.botName, config.ownerName); // Mostrar banner de nuevo
+    await startBanner(config.botName, config.ownerName); 
 
     console.log(chalk.bold.yellow('>>> INICIO DE VINCULACIÓN: SELECCIONA MÉTODO <<<'));
     console.log('--------------------------------------------------');
-    // Menú con las opciones exactas solicitadas por el usuario
     console.log(chalk.cyan('1. Vincular a través de QR'));
     console.log(chalk.cyan('2. Vincular a través de número'));
     console.log('--------------------------------------------------');
@@ -62,18 +60,13 @@ async function handlePairingFlow(sock) {
     const option = await rl.question('Envie con cuál opción desea vincular (1 o 2): ');
     rl.close();
 
-    // 2. Ejecutar opción seleccionada
     if (option === '1') {
-        // Opción 1: Código QR 
         console.log(chalk.green('\n✅ Opción seleccionada: Vincular a través de QR.'));
         console.log(chalk.yellow('Esperando datos de conexión... Escanea el código QR que aparecerá.'));
-        // La generación del QR ocurrirá en el evento 'qr' dentro de 'connection.update'.
-        // El bot no pedirá nada más, solo esperará el QR.
+        // El bot ahora esperará el evento 'qr' en connection.update.
 
     } else if (option === '2') {
-        // Opción 2: Código de 8 dígitos (Opción recomendada para consolas/servidores)
         
-        // Pedir el número de teléfono
         const rl2 = readline.createInterface({ input, output });
         const phoneNumber = await rl2.question('Por favor, ingresa tu número de teléfono (con código de país, ej: 519XXXXXXXX): ');
         rl2.close();
@@ -82,7 +75,6 @@ async function handlePairingFlow(sock) {
         if (cleanedNumber.startsWith('0')) cleanedNumber = cleanedNumber.substring(1);
 
         try {
-            // El bot solicitará el código de 8 dígitos.
             console.log(chalk.yellow(`\nSolicitando código de emparejamiento para +${cleanedNumber}...`));
             const code = await sock.requestPairingCode(cleanedNumber);
             
@@ -113,20 +105,19 @@ async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
     const { version } = await fetchLatestBaileysVersion();
     
-    // Si no está registrado, usaremos 'null' en la auth para forzar la primera conexión y la generación de QR/Código.
-    const auth = state.creds.registered ? state : null; 
+    // CORRECCIÓN CLAVE: Siempre pasamos el objeto 'state' a makeWASocket
+    const auth = state; 
 
     // 2. Configuración de la conexión
     const sock = makeWASocket({
         version,
         logger,
-        // Eliminamos pairingCode: true aquí. Lo manejamos manualmente si se elige la opción 2.
         auth: auth, 
         browser: ['ISAA-NOVA', 'Safari', '1.0.0'],
         getMessage: async (key) => {}
     });
 
-    // === Lógica de Vinculación si no está registrado (PRIMER INICIO) ===
+    // === Lógica de Vinculación si no está registrado ===
     if (!state.creds.registered) {
         await handlePairingFlow(sock); 
     }
@@ -136,7 +127,7 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // Manejar QR Code (Solo si se eligió la opción 1)
+        // Manejar QR Code 
         if (qr && !state.creds.registered) {
             console.log(chalk.yellow('\nEscanea el siguiente Código QR:'));
             qrcode.generate(qr, { small: true });
@@ -150,8 +141,7 @@ async function connectToWhatsApp() {
                 exit(0); 
             } 
             
-            // Si la conexión se cierra Y NO ESTAMOS REGISTRADOS, no reconectamos aquí. 
-            // El proceso de vinculación ya está en curso (QR o Código 8 dígitos).
+            // Si la conexión se cierra Y NO ESTAMOS REGISTRADOS, no reconectamos.
             if (!sock.authState.creds.registered) {
                 console.log(chalk.yellow(`\n⚠️ Esperando vinculación. Si el QR/código falló, reinicia el bot.`));
                 return;
@@ -173,7 +163,7 @@ async function connectToWhatsApp() {
     // 5. Guardar credenciales
     sock.ev.on('creds.update', saveCreds);
 
-    // 6. Manejar mensajes (resto de la lógica es la misma)
+    // 6. Manejar mensajes
     sock.ev.on('messages.upsert', async (m) => {
         if (!m.messages || m.messages.length === 0) return;
         const message = m.messages[0];
@@ -186,7 +176,7 @@ async function connectToWhatsApp() {
         }
     });
 
-    // 7. Evento de Bienvenida (se mantiene)
+    // 7. Evento de Bienvenida
     sock.ev.on('group-participants.update', async (data) => {
         const { id, participants, action } = data;
         
@@ -221,7 +211,6 @@ async function connectToWhatsApp() {
 
 // INICIO DEL BOT
 (async () => {
-    // Solo mostramos el banner si la sesión no existe (primer inicio)
     if (!fs.existsSync(SESSION_PATH)) {
         await startBanner(config.botName, config.ownerName); 
     }
