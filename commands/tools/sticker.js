@@ -1,6 +1,8 @@
 // commands/tools/sticker.js
-import { downloadMediaMessage } from '@adiwajshing/baileys';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import fs from 'fs-extra';
+import { tmpdir } from 'os';
+import path from 'path';
 
 export default {
     name: 'sticker',
@@ -10,32 +12,53 @@ export default {
     execute: async (sock, message, args, config) => {
         const from = message.key.remoteJid;
         const msg = message.message;
-        const type = Object.keys(msg || {})[0];
         
-        // Verificar si se está respondiendo a una imagen o video
-        const isMedia = (type === 'imageMessage' || type === 'videoMessage' || type === 'extendedTextMessage' && msg.extendedTextMessage?.contextInfo?.quotedMessage);
+        const type = Object.keys(msg || {})[0];
+        let media;
+        let isVideo = false;
+        
+        // 1. Verificar si hay un mensaje citado (quoted)
+        if (msg.extendedTextMessage?.contextInfo?.quotedMessage) {
+            const quoted = msg.extendedTextMessage.contextInfo.quotedMessage;
+            if (quoted.imageMessage) {
+                media = quoted.imageMessage;
+            } else if (quoted.videoMessage) {
+                media = quoted.videoMessage;
+                isVideo = true;
+            }
+        // 2. Verificar si es un mensaje directo (image/videoMessage)
+        } else if (type === 'imageMessage') {
+            media = msg.imageMessage;
+        } else if (type === 'videoMessage') {
+            media = msg.videoMessage;
+            isVideo = true;
+        }
 
-        if (!isMedia) {
-            return sock.sendMessage(from, { text: `Responde a una imagen o video con el comando *${config.prefix}sticker*` }, { quoted: message });
+        if (!media) {
+            return sock.sendMessage(from, { text: `Responde a una *imagen* o *video* con el comando *${config.prefix}sticker*` }, { quoted: message });
         }
         
-        const quoted = msg.extendedTextMessage?.contextInfo?.quotedMessage;
-        const mime = (quoted?.imageMessage || quoted?.videoMessage)?.mimetype || type;
-        
         try {
-            const stream = await downloadMediaMessage(
-                quoted || message,
+            const buffer = await downloadMediaMessage(
+                { message: media, key: message.key, },
                 'buffer',
                 {},
-                { logger: config.logger } // Pasar el logger si está disponible
+                { logger: config.logger }
             );
-            
-            // Envía el sticker. Baileys maneja la conversión a WebP (sticker) automáticamente.
-            await sock.sendMessage(from, { sticker: stream }, { quoted: message });
+
+            // Preparar para enviar como sticker
+            const stickerOptions = {
+                sticker: buffer,
+                // Puedes añadir metadatos del sticker aquí (opcional)
+                // packname: 'ISAA-NOVA',
+                // author: config.ownerName
+            };
+
+            await sock.sendMessage(from, stickerOptions, { quoted: message });
 
         } catch (error) {
             console.error('Error al crear sticker:', error);
-            await sock.sendMessage(from, { text: '❌ Error al procesar la multimedia para crear el sticker.' }, { quoted: message });
+            await sock.sendMessage(from, { text: '❌ Error al procesar la multimedia. Asegúrate de que el video no sea muy largo (máx. 10 segundos).' }, { quoted: message });
         }
     }
 };
